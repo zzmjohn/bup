@@ -1,0 +1,6 @@
+#!/bin/bash
+
+set -exo pipefail
+
+brew update
+brew install pandoc
