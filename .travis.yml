@@ -14,7 +14,7 @@ before_install:
   - git config --global user.name "Travis CI Build"
 
 script:
-  - make test
-  - if [ "$TRAVIS_OS_NAME" = linux ]; then fakeroot make test; fi
-  - sudo make test
+  - make -j check
+  - if [ "$TRAVIS_OS_NAME" = linux ]; then fakeroot make -j check; fi
+  - sudo make -j check
   - sudo make install
