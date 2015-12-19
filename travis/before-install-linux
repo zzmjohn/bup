@@ -1,7 +1,16 @@
 #!/bin/bash
 
-set -exo pipefail
+set -euxo pipefail
 
 sudo apt-get update -qq
-sudo apt-get install -y libc6-dev fakeroot par2 python2.7-dev python-fuse
-sudo apt-get install -y python-pyxattr python-pylibacl pandoc acl attr
+sudo apt-get install -y acl attr libc6-dev fakeroot pandoc par2
+sudo apt-get build-dep -y python-fuse python-pylibacl
+
+sudo CFLAGS=-Wno-error=maybe-uninitialized pip install pyxattr
+sudo pip install pylibacl
+
+sudo apt-get install -y fuse pkg-config
+sudo modprobe fuse
+sudo chmod 666 /dev/fuse
+sudo chown root:"$USER" /etc/fuse.conf
+sudo pip install fuse-python
