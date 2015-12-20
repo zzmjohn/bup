@@ -20,5 +20,5 @@ before_install:
 script:
   - make -j check
   - if [ "$TRAVIS_OS_NAME" = linux ]; then fakeroot make -j check; fi
-  - sudo make -j check
-  - sudo make install
+  - sudo -i make -C "$(pwd -P)" -j check
+  - sudo -i make -C "$(pwd -P)" install
