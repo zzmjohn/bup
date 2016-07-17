@@ -1,0 +1,58 @@
+#!/bin/bash
+
+# This should be called once as root and once as the normal travis user
+
+set -exo pipefail
+
+uid="$(id -u)"
+
+if [[ "$OSTYPE" =~ linux ]]; then
+    if [ "$uid" -eq 0 ]; then
+        apt-get update -qq
+        apt-get install -y acl attr libc6-dev fakeroot pandoc par2 \
+                libacl1-dev libattr1-dev
+        apt-get install -y fuse libfuse-dev pkg-config
+        modprobe fuse
+        chmod 666 /dev/fuse
+        chown root:travis /etc/fuse.conf
+    else
+        CFLAGS=-Wno-error=maybe-uninitialized pip install pyxattr
+        pip install pylibacl
+        pip install fuse-python
+        for mod in fuse posix1e xattr; do
+            python -c "import $mod"
+        done
+    fi
+elif [[ "$OSTYPE" =~ darwin ]]; then
+    if [ "$uid" -ne 0 ]; then
+        brew update
+        brew install pandoc par2
+    fi
+fi
+
+
+if [ "$uid" -ne 0 ]; then
+    # Create ~/bup-build-env
+    test "$TRAVIS_BUILD_DIR"
+    cat > ~/bup-build-env <<-EOF
+	#!/bin/bash
+	set -exo pipefail
+	EOF
+    printf 'export CC=%q\n' "$BUP_CC" >> ~/bup-build-env
+    printf 'export TRAVIS_BUILD_DIR=%q\n' "$TRAVIS_BUILD_DIR" >> ~/bup-build-env
+    printf '[ "$TRAVIS_BUILD_DIR" = %q ]\n' "$TRAVIS_BUILD_DIR" >> ~/bup-build-env
+    if [[ "$OSTYPE" =~ linux ]]; then
+        test "$VIRTUAL_ENV"
+        printf 'export PYTHON=%q\n' "$(type -p python)" >> ~/bup-build-env
+        printf 'if [ -z "$VIRTUAL_ENV"]; then source %q; fi\n' \
+               "$VIRTUAL_ENV/bin/activate" \
+               >> ~/bup-build-env
+        printf '[ "$VIRTUAL_ENV" = %q ]\n' "$VIRTUAL_ENV" >> ~/bup-build-env
+    fi
+    echo 'exec "$@"' >> ~/bup-build-env
+    chmod 755 ~/bup-build-env
+    cat ~/bup-build-env
+fi
+
+git config --global user.email 'someone@localhost'
+git config --global user.name 'Travis CI Build'

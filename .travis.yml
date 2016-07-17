@@ -1,24 +1,33 @@
 
 sudo: required
 dist: trusty
-
-language: c
+language: python
 
 os:
   - linux
-  - osx
 
-compiler:
-  - gcc
-  - clang
+python:
+  - 2.6
+  - 2.7
 
-before_install:
-  - travis/before-install-"$TRAVIS_OS_NAME"
-  - git config --global user.email "someone@localhost"
-  - git config --global user.name "Travis CI Build"
+env:
+  - BUP_CC=gcc
+  - BUP_CC=clang
+
+# Because OS X doesn't support "language: python"
+matrix:
+  include:
+    - os: osx
+      language: generic
+      env: BUP_CC=gcc
+    - os: osx
+      language: generic
+      env: BUP_CC=clang
+
+install:
+  - sudo -i "$TRAVIS_BUILD_DIR/travis/prep-system"
+  - "$TRAVIS_BUILD_DIR/travis/prep-system"
 
 script:
-  - make -j check
-  - if [ "$TRAVIS_OS_NAME" = linux ]; then fakeroot make -j check; fi
-  - sudo -i make -C "$(pwd -P)" -j check
-  - sudo -i make -C "$(pwd -P)" install
+  - ~/bup-build-env "$TRAVIS_BUILD_DIR/travis/test"
+  - sudo -i ~/bup-build-env "$TRAVIS_BUILD_DIR/travis/test"

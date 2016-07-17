@@ -1,0 +1,18 @@
+#!/bin/bash
+
+set -uexo pipefail
+
+uid="$(id -u)"
+
+cd -P "$TRAVIS_BUILD_DIR"
+
+make -j check
+
+if [ "$uid" -ne 0 ] && [[ "$OSTYPE" =~ linux ]]; then
+    fakeroot make -j check
+fi
+
+make DESTDIR="$(pwd)/tmp-install" install
+
+"$(pwd)/tmp-install"/usr/local/bin/bup --version
+
