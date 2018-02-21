@@ -5,7 +5,8 @@ exec "$bup_python" "$0" ${1+"$@"}
 """
 # end of bup preamble
 
-import glob, math, os, resource, struct, sys, tempfile
+from __future__ import absolute_import
+import errno, glob, math, mmap, os, resource, struct, shutil, sys, tempfile
 
 from bup import options, git, midx, _helpers, xstat
 from bup.helpers import (Sha1, add_error, atomically_replaced_file, debug1, fdatasync,
@@ -27,9 +28,6 @@ check      validate contents of the given midx files (with -a, all midx files)
 max-files= maximum number of idx files to open at once [-1]
 d,dir=     directory containing idx/midx files
 """
-
-merge_into = _helpers.merge_into
-
 
 def _group(l, count):
     for i in xrange(0, len(l), count):
@@ -78,6 +76,96 @@ def check_midx(name):
                          str(e).encode('hex'), str(prev).encode('hex')))
         prev = e
 
+# Vestigial debug code from the end of _do_midx_*, where it was was
+# disabled, and where it was unclear what "i" referred to.
+#
+# def _debug_midx(outfilename, infilenames, inp, i, total):
+#     p = midx.PackMidx(outfilename)
+#     assert(len(p.idxnames) == len(infilenames))
+#     print p.idxnames
+#     assert(len(p) == total)
+#     for pe, e in p, git.idxmerge(inp, final_progress=False):
+#         pin = next(pi)
+#         assert(i == pin)
+#         assert(p.exists(i))
+
+def _extract_bits(buf, bits):
+    mask = (1<<bits) - 1
+    v = struct.unpack('!Q', buf[0:8])[0]
+    v = (v >> (64-bits)) & mask
+    return v
+
+def _merge_into_slowly(tf_sha, tf_nmap, idxlist, bits, entries, total):
+    prefix = 0
+    idxlist = [list(x) for x in idxlist]
+    it = git.idxmerge(idxlist, final_progress=False)
+    for i, (e, idx) in enumerate(it):
+        new_prefix = _extract_bits(e, bits)
+        if new_prefix != prefix:
+            for p in xrange(prefix, new_prefix):
+                yield i
+            prefix = new_prefix
+        tf_sha.write(e)
+        tf_nmap.write(struct.pack('!I', idx))
+    i += 1
+    for p in xrange(prefix, entries):
+        yield i
+
+def _do_midx_slowly(outdir, outfilename, infilenames, prefixstr):
+    if not outfilename:
+        assert(outdir)
+        sum = Sha1('\0'.join(infilenames)).hexdigest()
+        outfilename = '%s/midx-%s.midx' % (outdir, sum)
+
+    inp = []
+    total = 0
+    allfilenames = []
+    for name in infilenames:
+        ix = git.open_idx(name, use_mmap=False)
+        inp.append(ix.iter_with_idx_i(len(allfilenames)))
+        for n in ix.idxnames:
+            allfilenames.append(os.path.basename(n))
+        total += len(ix)
+
+    log('midx: %screating from %d files (%d objects).\n'
+        % (prefixstr, len(infilenames), total))
+    if (not opt.force and (total < 1024 and len(infilenames) < 3)) \
+       or len(infilenames) < 2 \
+       or (opt.force and not total):
+        debug1('midx: nothing to do.\n')
+        return
+
+    pages = int(total/SHA_PER_PAGE) or 1
+    bits = int(math.ceil(math.log(pages, 2)))
+    entries = 2**bits
+    debug1('midx: table size: %d (%d bits)\n' % (entries*4, bits))
+
+    unlink(outfilename)
+    f = open(outfilename + '.tmp', 'w+')
+    f.write('MIDX')
+    f.write(struct.pack('!II', midx.MIDX_VERSION, bits))
+    assert(f.tell() == 12)
+
+    tf_sha = tempfile.TemporaryFile(dir=outdir)
+    tf_nmap = tempfile.TemporaryFile(dir=outdir)
+    for t in _merge_into_slowly(tf_sha, tf_nmap, inp, bits, entries, total):
+        f.write(struct.pack('!I', t))
+    assert(f.tell() == 12 + 4*entries)
+
+    tf_sha.seek(0)
+    shutil.copyfileobj(tf_sha, f)
+    tf_sha.close()
+    assert(f.tell() == 12 + 4*entries + 20*t) # t may be < total due to dupes
+
+    tf_nmap.seek(0)
+    shutil.copyfileobj(tf_nmap, f)
+    tf_nmap.close()
+    assert(f.tell() == 12 + 4*entries + 24*t) # t may be < total due to dupes
+
+    f.write('\0'.join(allfilenames))
+    f.close()
+    os.rename(outfilename + '.tmp', outfilename)
+    return total, outfilename
 
 _first = None
 def _do_midx(outdir, outfilename, infilenames, prefixstr):
@@ -96,7 +184,7 @@ def _do_midx(outdir, outfilename, infilenames, prefixstr):
             ix = git.open_idx(name)
             midxs.append(ix)
             inp.append((
-                ix.map,
+                ix.reader.map if isinstance(ix, midx.PackMidx) else ix.map,
                 len(ix),
                 ix.sha_ofs,
                 isinstance(ix, midx.PackMidx) and ix.which_ofs or 0,
@@ -134,7 +222,7 @@ def _do_midx(outdir, outfilename, infilenames, prefixstr):
 
             fmap = mmap_readwrite(f, close=False)
 
-            count = merge_into(fmap, bits, total, inp)
+            count = _helpers.merge_into(fmap, bits, total, inp)
             del fmap # Assume this calls msync() now.
             f.seek(0, os.SEEK_END)
             f.write('\0'.join(allfilenames))
@@ -145,23 +233,21 @@ def _do_midx(outdir, outfilename, infilenames, prefixstr):
         midxs = None
         inp = None
 
-
-    # This is just for testing (if you enable this, don't clear inp above)
-    if 0:
-        p = midx.PackMidx(outfilename)
-        assert(len(p.idxnames) == len(infilenames))
-        print p.idxnames
-        assert(len(p) == total)
-        for pe, e in p, git.idxmerge(inp, final_progress=False):
-            pin = pi.next()
-            assert(i == pin)
-            assert(p.exists(i))
-
     return total, outfilename
 
 
 def do_midx(outdir, outfilename, infilenames, prefixstr):
-    rv = _do_midx(outdir, outfilename, infilenames, prefixstr)
+    try_again = False
+    try:
+        rv = _do_midx(outdir, outfilename, infilenames, prefixstr)
+    except mmap.error as ex:
+        if ex.errno != errno.ENOMEM:
+            raise
+        try_again = True
+    if try_again:
+        _first = None
+        log('midx mmap failed, retrying via streaming writes\n')
+        rv = _do_midx_slowly(outdir, outfilename, infilenames, prefixstr)
     if rv and opt['print']:
         print rv[1]
 

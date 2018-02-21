@@ -3,6 +3,7 @@ bup repositories are in Git format. This library allows us to
 interact with the Git data structures.
 """
 
+from __future__ import absolute_import
 import errno, os, sys, zlib, time, subprocess, struct, stat, re, tempfile, glob
 from collections import namedtuple
 from itertools import islice
@@ -351,6 +352,9 @@ class PackIdx:
                 return mid
         return None
 
+    def iter_with_idx_i(self, idx_i):
+        for e in self:
+            yield e, idx_i
 
 class PackIdxV1(PackIdx):
     """Object representation of a Git pack index (version 1) file."""
@@ -542,7 +546,7 @@ class PackIdxList:
         self.also.add(hash)
 
 
-def open_idx(filename):
+def open_idx(filename, use_mmap=True):
     if filename.endswith('.idx'):
         f = open(filename, 'rb')
         header = f.read(8)
@@ -558,7 +562,7 @@ def open_idx(filename):
         else:
             raise GitError('%s: unrecognized idx file header' % filename)
     elif filename.endswith('.midx'):
-        return midx.PackMidx(filename)
+        return midx.PackMidx(filename, use_mmap=use_mmap)
     else:
         raise GitError('idx filenames must end with .idx or .midx')
 
