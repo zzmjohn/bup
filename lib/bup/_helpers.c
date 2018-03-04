@@ -701,6 +701,18 @@ struct sha {
     unsigned char bytes[20];
 };
 
+/* static void print_sha(FILE *f, struct sha *sha) */
+/* { */
+/*     unsigned char *x = &(sha->bytes[0]); */
+/*     unsigned char *end = x + sizeof(sha->bytes); */
+/*     while (x != end) */
+/*     { */
+/*         fprintf(f, "%x%x", *x >> 4, *x && 0xf0); */
+/*         x++; */
+/*     } */
+/* } */
+
+
 
 struct idx {
     unsigned char *map;
@@ -831,12 +843,219 @@ static PyObject *merge_into(PyObject *self, PyObject *args)
 	*name_ptr++ = htonl(_get_idx_i(idx));
 	++idx->cur;
 	if (idx->cur_name != NULL)
-	    ++idx->cur_name;
+	    ++idx->cur_name;  // src is midx: advance name table pointer
 	_fix_idx_order(idxs, &last_i);
 	++count;
     }
     while (prefix < (1<<bits))
 	table_ptr[prefix++] = htonl(count);
+    assert(count == total);
+    assert(prefix == (1<<bits));
+    assert(sha_ptr == sha_start+count);
+    assert(name_ptr == name_start+count);
+
+    PyMem_Free(idxs);
+    return PyLong_FromUnsignedLong(count);
+}
+
+//  FIXME: whichlist?
+
+struct fidx {
+    const char *name;
+    ssize_t remaining;  // in the stream, i.e. not including cur
+    FILE *oids;
+    FILE *whichlist;  // if midx src, src whichlist table
+    // Either the ordinal position of this sha's src index in the midx
+    // name list, or the base for that, if the src is a midx.
+    int name_base;
+    uint32_t midx_idxname_i;  // if midx src, whichlist table value for cur
+    struct sha cur;
+};
+
+static int cmp_reversed_fidx_cur(struct fidx **x, struct fidx **y)
+{
+    return _cmp_sha(&(*y)->cur, &(*x)->cur);
+}
+
+static uint32_t _get_fidx_i(struct fidx *idx)
+{
+    if (idx->whichlist == NULL)
+	return idx->name_base;
+    return idx->name_base + idx->midx_idxname_i;
+}
+
+// FIXME: replace with bsearch?
+
+static void _fix_fidx_order(struct fidx **idxs, int *last_i)
+{
+    struct fidx *idx;
+    int low, mid, high, c = 0;
+
+    idx = idxs[*last_i];
+    if ((idxs[*last_i]->remaining + 1) == 0)
+    {
+	idxs[*last_i] = NULL;
+        // FIXME: propagate error...
+        assert(fclose(idx->oids) == 0);
+        if (idx->whichlist != NULL)
+            assert(fclose(idx->whichlist) == 0);
+	PyMem_Free(idx);
+	--*last_i;
+	return;
+    }
+    if (*last_i == 0)
+	return;
+
+    low = *last_i-1;
+    mid = *last_i;
+    high = 0;
+    while (low >= high)
+    {
+	mid = (low + high) / 2;
+	c = _cmp_sha(&idx->cur, &idxs[mid]->cur);
+	if (c < 0)
+	    high = mid + 1;
+	else if (c > 0)
+	    low = mid - 1;
+	else
+	    break;
+    }
+    if (c < 0)
+	++mid;
+    if (mid == *last_i)
+	return;
+    memmove(&idxs[mid+1], &idxs[mid], (*last_i-mid)*sizeof(struct fidx *));
+    idxs[mid] = idx;
+}
+
+
+
+static int advance_fidx(struct fidx *idx) {
+    size_t nread = fread(idx->cur.bytes, 20, 1, idx->oids);
+    if (nread != 1) {
+        if (ferror(idx->oids)) {
+            PyErr_SetFromErrnoWithFilename(PyExc_IOError, idx->name);
+            return 0;
+        }
+        // FIXME: right exception, etc.?
+        assert(feof(idx->oids));
+        PyErr_Format(PyExc_IOError, "unable to read (%ld %d) oid table in %s",
+                     nread, feof(idx->oids), idx->name);
+        return 0;
+    }
+    if (idx->whichlist != NULL) {
+        size_t nread = fread(&idx->midx_idxname_i,
+                             sizeof(idx->midx_idxname_i),
+                             1, idx->whichlist);
+        if (nread != 1) {
+            if (ferror(idx->whichlist)) {
+                PyErr_SetFromErrnoWithFilename(PyExc_IOError, idx->name);
+                return 0;
+            }
+            // FIXME: right exception, etc.?
+            assert(feof(idx->whichlist));
+            PyErr_Format(PyExc_IOError, "unexpected end of whichlist table in %s",
+                         idx->name);
+            return 0;
+        }
+        idx->midx_idxname_i = ntohl(idx->midx_idxname_i);
+    }
+    idx->remaining--;
+    return 1;
+}
+
+
+static PyObject *merge_idx_files_into_midx(PyObject *self, PyObject *args)
+{
+    PyObject *py_total, *ilist = NULL;
+    unsigned char *fmap = NULL;
+    struct sha *sha_ptr, *sha_start = NULL;
+    uint32_t *table_ptr, *name_ptr, *name_start;
+    struct fidx **idxs = NULL;
+    Py_ssize_t flen = 0;
+    int bits = 0, i;
+    unsigned int total;
+    uint32_t count, prefix;
+    int num_i;
+    int last_i;
+
+    // FIXME: cleanup on error...
+
+    if (!PyArg_ParseTuple(args, "w#iOO",
+                          &fmap, &flen, &bits, &py_total, &ilist))
+	return NULL;
+
+    if (!bup_uint_from_py(&total, py_total, "total"))
+        return NULL;
+
+    num_i = PyList_Size(ilist);
+    idxs = (struct fidx **)PyMem_Malloc(num_i * sizeof(struct fidx *));
+
+    for (i = 0; i < num_i; i++)
+    {
+	long sha_ofs, name_map_ofs;
+	idxs[i] = (struct fidx *)PyMem_Malloc(sizeof(struct fidx));
+	PyObject *itup = PyList_GetItem(ilist, i);
+	if (!PyArg_ParseTuple(itup, "sllli",
+                              &idxs[i]->name,
+                              &idxs[i]->remaining,
+                              &sha_ofs, &name_map_ofs,
+                              &idxs[i]->name_base))
+	    return NULL;
+        assert(idxs[i]->remaining);
+        idxs[i]->oids = fopen(idxs[i]->name, "rb");
+        if (idxs[i]->oids == NULL
+            || fseek(idxs[i]->oids, sha_ofs, SEEK_SET) < 0) {
+            return PyErr_SetFromErrnoWithFilename(PyExc_IOError, idxs[i]->name);
+        }
+
+        if (!name_map_ofs)
+            idxs[i]->whichlist = NULL;
+        else {
+            idxs[i]->whichlist = fopen(idxs[i]->name, "rb");
+            if (idxs[i]->whichlist == NULL
+                || fseek(idxs[i]->whichlist, name_map_ofs, SEEK_SET) < 0) {
+                return PyErr_SetFromErrnoWithFilename(PyExc_IOError, idxs[i]->name);
+            }
+        }
+
+        if (!advance_fidx(idxs[i]))
+            return NULL;
+    }
+
+    // Set initial order
+    qsort(&(idxs[0]),
+          num_i, sizeof(struct fidx *),
+          (int (*)(const void *, const void *)) cmp_reversed_fidx_cur);
+
+    table_ptr = (uint32_t *)&fmap[MIDX4_HEADERLEN];
+    sha_start = sha_ptr = (struct sha *)&table_ptr[1<<bits];
+    name_start = name_ptr = (uint32_t *)&sha_ptr[total];
+
+    last_i = num_i-1;
+    count = 0;
+    prefix = 0;
+    while (last_i >= 0)
+    {
+	struct fidx *idx;
+	uint32_t new_prefix;
+	if (count % 102424 == 0 && istty2)
+	    fprintf(stderr, "midx: writing %.2f%% (%d/%d)\r",
+		    count*100.0/total, count, total);
+	idx = idxs[last_i];
+	new_prefix = _extract_bits(idx->cur.bytes, bits);
+	while (prefix < new_prefix)
+	    table_ptr[prefix++] = htonl(count);
+	memcpy(sha_ptr++, idx->cur.bytes, 20);
+	*name_ptr++ = htonl(_get_fidx_i(idx));
+        if (!advance_fidx(idx))
+            return NULL;
+	_fix_fidx_order(idxs, &last_i);
+	++count;
+    }
+    while (prefix < (1<<bits))
+	table_ptr[prefix++] = htonl(count);
+    assert(last_i == -1);
     assert(count == total);
     assert(prefix == (1<<bits));
     assert(sha_ptr == sha_start+count);
@@ -1501,6 +1720,8 @@ static PyMethodDef helper_methods[] = {
     { "extract_bits", extract_bits, METH_VARARGS,
 	"Take the first 'nbits' bits from 'buf' and return them as an int." },
     { "merge_into", merge_into, METH_VARARGS,
+	"Merges a bunch of idx and midx files into a single midx." },
+    { "merge_idx_files_into_midx", merge_idx_files_into_midx, METH_VARARGS,
 	"Merges a bunch of idx and midx files into a single midx." },
     { "write_idx", write_idx, METH_VARARGS,
 	"Write a PackIdxV2 file from an idx list of lists of tuples" },

@@ -79,6 +79,8 @@ def check_midx(name):
         prev = e
 
 
+_mmap_midx = False
+
 _first = None
 def _do_midx(outdir, outfilename, infilenames, prefixstr):
     global _first
@@ -93,19 +95,40 @@ def _do_midx(outdir, outfilename, infilenames, prefixstr):
     midxs = []
     try:
         for name in infilenames:
+            # FIXME: eventually remove open_idx in favor of get_ofs or...?
             ix = git.open_idx(name)
             midxs.append(ix)
-            inp.append((
-                ix.map,
-                len(ix),
-                ix.sha_ofs,
-                isinstance(ix, midx.PackMidx) and ix.which_ofs or 0,
-                len(allfilenames),
-            ))
+            if _mmap_midx:
+                inp.append((
+                    ix.map,
+                    len(ix),
+                    ix.sha_ofs,
+                    isinstance(ix, midx.PackMidx) and ix.which_ofs or 0,
+                    len(allfilenames),
+                ))
+            else:
+                assert not isinstance(ix, git.PackIdxV1)  # b/c no contiguous oidtable
+                # Order of allfilenames here is what merge uses as the
+                # offsets in the filename offset taable, paralleling the
+                # order in the eventual allfilenames join below.
+                inp.append((ix.name,
+                            len(ix),
+                            ix.sha_ofs,
+                            isinstance(ix, midx.PackMidx) and ix.which_ofs or 0,
+                            len(allfilenames)))
+
             for n in ix.idxnames:
                 allfilenames.append(os.path.basename(n))
             total += len(ix)
-        inp.sort(lambda x,y: cmp(str(y[0][y[2]:y[2]+20]),str(x[0][x[2]:x[2]+20])))
+
+            if not _mmap_midx:
+                if isinstance(ix, midx.PackMidx):
+                    ix.close()
+                else:
+                    del ix
+
+        if _mmap_midx:
+            inp.sort(reverse=True, key=lambda x: str(x[0][x[2]:x[2]+20]))
 
         if not _first: _first = outdir
         dirprefix = (_first != outdir) and git.repo_rel(outdir)+': ' or ''
@@ -134,14 +157,18 @@ def _do_midx(outdir, outfilename, infilenames, prefixstr):
 
             fmap = mmap_readwrite(f, close=False)
 
-            count = merge_into(fmap, bits, total, inp)
+            if _mmap_midx:
+                count = merge_into(fmap, bits, total, inp)
+            else:
+                count = _helpers.merge_idx_files_into_midx(fmap, bits, total, inp)
             del fmap # Assume this calls msync() now.
             f.seek(0, os.SEEK_END)
             f.write('\0'.join(allfilenames))
     finally:
-        for ix in midxs:
-            if isinstance(ix, midx.PackMidx):
-                ix.close()
+        if _mmap_midx:
+            for ix in midxs:
+                if isinstance(ix, midx.PackMidx):
+                    ix.close()
         midxs = None
         inp = None
 
