@@ -3,6 +3,7 @@ import errno, metadata, os, stat, struct, tempfile
 from bup import xstat
 from bup._helpers import UINT_MAX
 from bup.helpers import (add_error, log, merge_iter, mmap_readwrite,
+                         mmap_release,
                          progress, qprogress, resolve_parent, slashappend)
 
 EMPTY_SHA = '\0'*20
@@ -399,7 +400,7 @@ class Reader:
             else:
                 st = os.fstat(f.fileno())
                 if st.st_size:
-                    self.m = mmap_readwrite(f)
+                    self.m = mmap_readwrite(f, trace=True)
                     self.writable = True
                     self.count = struct.unpack(FOOTER_SIG,
                           str(buffer(self.m, st.st_size-FOOTLEN, FOOTLEN)))[0]
@@ -451,7 +452,7 @@ class Reader:
     def close(self):
         self.save()
         if self.writable and self.m:
-            self.m.close()
+            mmap_release(self.m)
             self.m = None
             self.writable = False
 

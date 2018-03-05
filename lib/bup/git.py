@@ -11,7 +11,7 @@ from bup import _helpers, hashsplit, path, midx, bloom, xstat
 from bup.helpers import (Sha1, add_error, chunkyreader, debug1, debug2,
                          fdatasync,
                          hostname, localtime, log, merge_iter,
-                         mmap_read, mmap_readwrite,
+                         mmap_read, mmap_readwrite, mmap_release,
                          progress, qprogress, stat_if_exists,
                          unlink, username, userfullname,
                          utc_offset_str)
@@ -357,13 +357,18 @@ class PackIdxV1(PackIdx):
     def __init__(self, filename, f):
         self.name = filename
         self.idxnames = [self.name]
-        self.map = mmap_read(f)
+        self.map = mmap_read(f, trace=True)
         self.fanout = list(struct.unpack('!256I',
                                          str(buffer(self.map, 0, 256*4))))
         self.fanout.append(0)  # entry "-1"
         nsha = self.fanout[255]
         self.sha_ofs = 256*4
         self.shatable = buffer(self.map, self.sha_ofs, nsha*24)
+
+    def __del__(self):
+        if self.map:
+            mmap_release(self.map)
+            self.map = None
 
     def _ofs_from_idx(self, idx):
         return struct.unpack('!I', str(self.shatable[idx*24 : idx*24+4]))[0]
@@ -381,7 +386,7 @@ class PackIdxV2(PackIdx):
     def __init__(self, filename, f):
         self.name = filename
         self.idxnames = [self.name]
-        self.map = mmap_read(f)
+        self.map = mmap_read(f, trace=True)
         assert(str(self.map[0:8]) == '\377tOc\0\0\0\2')
         self.fanout = list(struct.unpack('!256I',
                                          str(buffer(self.map, 8, 256*4))))
@@ -394,6 +399,11 @@ class PackIdxV2(PackIdx):
                                nsha*4)
         self.ofs64table = buffer(self.map,
                                  8 + 256*4 + nsha*20 + nsha*4 + nsha*4)
+
+    def __del__(self):
+        if self.map:
+            mmap_release(self.map)
+            self.map = None
 
     def _ofs_from_idx(self, idx):
         ofs = struct.unpack('!I', str(buffer(self.ofstable, idx*4, 4)))[0]
@@ -415,7 +425,7 @@ _mpi_count = 0
 class PackIdxList:
     def __init__(self, dir):
         global _mpi_count
-        assert(_mpi_count == 0) # these things suck tons of VM; don't waste it
+        #assert(_mpi_count == 0) # these things suck tons of VM; don't waste it
         _mpi_count += 1
         self.dir = dir
         self.also = set()
@@ -427,7 +437,7 @@ class PackIdxList:
     def __del__(self):
         global _mpi_count
         _mpi_count -= 1
-        assert(_mpi_count == 0)
+        #assert(_mpi_count == 0)
 
     def __iter__(self):
         return iter(idxmerge(self.packs))
@@ -803,13 +813,13 @@ class PackWriter:
         try:
             idx_f.truncate(index_len)
             fdatasync(idx_f.fileno())
-            idx_map = mmap_readwrite(idx_f, close=False)
+            idx_map = mmap_readwrite(idx_f, close=False, trace=True)
             try:
                 count = _helpers.write_idx(filename, idx_map, idx, self.count)
                 assert(count == self.count)
                 idx_map.flush()
             finally:
-                idx_map.close()
+                mmap_release(idx_map)
         finally:
             idx_f.close()
 

@@ -9,7 +9,7 @@ import glob, math, os, resource, struct, sys, tempfile
 
 from bup import options, git, midx, _helpers, xstat
 from bup.helpers import (Sha1, add_error, atomically_replaced_file, debug1, fdatasync,
-                         handle_ctrl_c, log, mmap_readwrite, qprogress,
+                         handle_ctrl_c, log, mmap_readwrite, mmap_release, qprogress,
                          saved_errors, unlink)
 
 
@@ -155,13 +155,14 @@ def _do_midx(outdir, outfilename, infilenames, prefixstr):
             f.flush()
             fdatasync(f.fileno())
 
-            fmap = mmap_readwrite(f, close=False)
+            fmap = mmap_readwrite(f, close=False, trace=True)
 
             if _mmap_midx:
                 count = merge_into(fmap, bits, total, inp)
             else:
                 count = _helpers.merge_idx_files_into_midx(fmap, bits, total, inp)
-            del fmap # Assume this calls msync() now.
+            mmap_release(fmap)  # Assume this calls msync() now.
+            #del fmap # Assume this calls msync() now.
             f.seek(0, os.SEEK_END)
             f.write('\0'.join(allfilenames))
     finally:

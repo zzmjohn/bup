@@ -4,8 +4,9 @@ from collections import namedtuple
 from ctypes import sizeof, c_void_p
 from os import environ
 from contextlib import contextmanager
+import inspect
 import sys, os, pwd, subprocess, errno, socket, select, mmap, stat, re, struct
-import hashlib, heapq, math, operator, time, grp, tempfile
+import hashlib, heapq, math, operator, time, grp, tempfile, traceback
 
 from bup import _helpers
 
@@ -740,7 +741,28 @@ def slashappend(s):
         return s
 
 
-def _mmap_do(f, sz, flags, prot, close):
+mmaps = {}
+
+def notice_mmap(map, sz, tb):
+    mmaps[map] = sz, tb
+
+def print_full_stack(f, tb):
+    for x in reversed(inspect.getouterframes(tb.tb_frame)):
+        frame, file, line, func, context_lines, context_i = x
+        f.write('File %r, line %d, in %s\n' % (file, line, func))
+        f.write('  %s\n' % context_lines[context_i].strip())
+
+def dump_mmap_info(f):
+    print >> f, mmaps.values()
+    for sz, tb in mmaps.values():
+        print >> f, '=== open mmap region of %d bytes ===' % sz
+        print_full_stack(f, tb)
+    foot = '=== total of %d mmapped bytes ===' % sum(x[0] for x in mmaps.values())
+    print >> f, '=' * len(foot)
+    print >> f, foot
+    print >> f, '=' * len(foot)
+
+def _mmap_do(f, sz, flags, prot, close, trace=False):
     if not sz:
         st = os.fstat(f.fileno())
         sz = st.st_size
@@ -750,34 +772,45 @@ def _mmap_do(f, sz, flags, prot, close):
         # no elements :)
         return ''
     map = mmap.mmap(f.fileno(), sz, flags, prot)
+    if trace:
+        try:
+            raise Exception()
+        except Exception as ex:
+            tb = sys.exc_info()[2]
+        notice_mmap(map, sz, tb)
     if close:
         f.close()  # map will persist beyond file close
     return map
 
+def mmap_release(m):
+    m.close()
+    return
+    assert mmaps[m]
+    del mmaps[m]
 
-def mmap_read(f, sz = 0, close=True):
+def mmap_read(f, sz = 0, close=True, trace=False):
     """Create a read-only memory mapped region on file 'f'.
     If sz is 0, the region will cover the entire file.
     """
-    return _mmap_do(f, sz, mmap.MAP_PRIVATE, mmap.PROT_READ, close)
+    return _mmap_do(f, sz, mmap.MAP_PRIVATE, mmap.PROT_READ, close, trace=trace)
 
 
-def mmap_readwrite(f, sz = 0, close=True):
+def mmap_readwrite(f, sz = 0, close=True, trace=False):
     """Create a read-write memory mapped region on file 'f'.
     If sz is 0, the region will cover the entire file.
     """
     return _mmap_do(f, sz, mmap.MAP_SHARED, mmap.PROT_READ|mmap.PROT_WRITE,
-                    close)
+                    close, trace=trace)
 
 
-def mmap_readwrite_private(f, sz = 0, close=True):
+def mmap_readwrite_private(f, sz = 0, close=True, trace=False):
     """Create a read-write memory mapped region on file 'f'.
     If sz is 0, the region will cover the entire file.
     The map is private, which means the changes are never flushed back to the
     file.
     """
     return _mmap_do(f, sz, mmap.MAP_PRIVATE, mmap.PROT_READ|mmap.PROT_WRITE,
-                    close)
+                    close, trace=trace)
 
 
 _mincore = getattr(_helpers, 'mincore', None)
@@ -814,12 +847,18 @@ if _mincore:
             msize = min(_fmincore_chunk_size, st.st_size - pos)
             try:
                 m = mmap.mmap(fd, msize, mmap.MAP_PRIVATE, 0, 0, pos)
+                try:
+                    raise Exception()
+                except Exception as ex:
+                    tb = sys.exc_info()[2]
+                notice_mmap(m, msize, tb)
             except mmap.error as ex:
                 if ex.errno == errno.EINVAL or ex.errno == errno.ENODEV:
                     # Perhaps the file was a pipe, i.e. "... | bup split ..."
                     return None
                 raise ex
-            _mincore(m, msize, 0, result, ci * pages_per_chunk);
+            _mincore(m, msize, 0, result, ci * pages_per_chunk)
+            mmap_release(m)
         return result
 
 

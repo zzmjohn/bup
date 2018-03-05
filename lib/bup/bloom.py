@@ -84,7 +84,7 @@ import sys, os, math, mmap, struct
 
 from bup import _helpers
 from bup.helpers import (debug1, debug2, log, mmap_read, mmap_readwrite,
-                         mmap_readwrite_private, unlink)
+                         mmap_readwrite_private, mmap_release, unlink)
 
 
 BLOOM_VERSION = 2
@@ -134,13 +134,13 @@ class ShaBloom:
             self.delaywrite = expected > pages
             debug1('bloom: delaywrite=%r\n' % self.delaywrite)
             if self.delaywrite:
-                self.map = mmap_readwrite_private(self.rwfile, close=False)
+                self.map = mmap_readwrite_private(self.rwfile, close=False, trace=True)
             else:
-                self.map = mmap_readwrite(self.rwfile, close=False)
+                self.map = mmap_readwrite(self.rwfile, close=False, trace=True)
         else:
             self.rwfile = None
             f = f or open(filename, 'rb')
-            self.map = mmap_read(f)
+            self.map = mmap_read(f, trace=True)
         got = str(self.map[0:4])
         if got != 'BLOM':
             log('Warning: invalid BLOM header (%r) in %r\n' % (got, filename))
@@ -164,6 +164,7 @@ class ShaBloom:
 
     def _init_failed(self):
         if self.map:
+            mmap_release(self.map)
             self.map = None
         if self.rwfile:
             self.rwfile.close()

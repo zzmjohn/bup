@@ -1,8 +1,8 @@
 
-import git, glob, mmap, os, struct
+import errno, git, glob, mmap, os, struct, sys
 
-from bup import _helpers
-from bup.helpers import log, mmap_read
+from bup import _helpers, helpers
+from bup.helpers import log, mmap_read, mmap_release, dump_mmap_info
 
 
 MIDX_VERSION = 4
@@ -23,7 +23,13 @@ class PackMidx:
         self.force_keep = False
         self.map = None
         assert(filename.endswith('.midx'))
-        self.map = mmap_read(open(filename))
+        try:
+            self.map = mmap_read(open(filename), trace=True)
+        except mmap.error as ex:
+            if ex.errno != errno.ENOMEM:
+                raise
+            dump_mmap_info(sys.stderr)
+            raise
         if str(self.map[0:4]) != 'MIDX':
             log('Warning: skipping: invalid MIDX header in %r\n' % filename)
             self.force_keep = True
@@ -76,7 +82,7 @@ class PackMidx:
 
     def close(self):
         if self.map is not None:
-            self.map.close()
+            mmap_release(self.map)
             self.map = None
 
     def exists(self, hash, want_source=False):

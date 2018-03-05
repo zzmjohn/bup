@@ -1,6 +1,7 @@
 import io, math, os
 
 from bup import _helpers, helpers
+
 from bup.helpers import sc_page_size
 
 _fmincore = getattr(helpers, 'fmincore', None)
