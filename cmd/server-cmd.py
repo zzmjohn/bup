@@ -87,6 +87,7 @@ def receive_objects_v2(conn, junk):
         ns = conn.read(4)
         if not ns:
             w.abort()
+            w = None
             raise Exception('object read: expected length header, got EOF\n')
         n = struct.unpack('!I', ns)[0]
         #debug2('expecting %d bytes\n' % n)
@@ -94,6 +95,7 @@ def receive_objects_v2(conn, junk):
             debug1('bup server: received %d object%s.\n' 
                 % (w.count, w.count!=1 and "s" or ''))
             fullpath = w.close(run_midx=not dumb_server_mode)
+            w = None
             if fullpath:
                 (dir, name) = os.path.split(fullpath)
                 conn.write('%s.idx\n' % name)
