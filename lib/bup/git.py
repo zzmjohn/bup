@@ -7,7 +7,7 @@ import errno, os, sys, zlib, time, subprocess, struct, stat, re, tempfile, glob
 from collections import namedtuple
 from itertools import islice
 
-from bup import _helpers, hashsplit, path, midx, bloom, xstat
+from bup import _helpers, hashsplit, helpers, path, midx, bloom, xstat
 from bup.helpers import (Sha1, add_error, chunkyreader, debug1, debug2,
                          fdatasync,
                          hostname, localtime, log, merge_iter,
@@ -422,11 +422,31 @@ class PackIdxV2(PackIdx):
 
 
 _mpi_count = 0
+_mpi_sources = {}
+
+def dump_srcs(f):
+    global _mpi_sources
+    head = '=== %d open midxs ===' % len(_mpi_sources.values())
+    print >> f, head
+    for m, stack_str in _mpi_sources.items():
+        print >> f, repr(m)
+        print >> f, stack_str
+    print >> f, '=' * len(head)
+
 class PackIdxList:
     def __init__(self, dir):
+        print >> sys.stderr, 'creating', repr(self)
         global _mpi_count
-        #assert(_mpi_count == 0) # these things suck tons of VM; don't waste it
+        self.closed = False
         _mpi_count += 1
+        try:
+            raise Exception()
+        except Exception as ex:
+            tb = sys.exc_info()[2]
+        _mpi_sources[repr(self)] = helpers.full_stack_as_str(tb)
+        assert _mpi_count in (1, 2) # these things suck tons of VM; don't waste it
+        print >> sys.stderr, 'increased _mpi_count', _mpi_count
+        print >> sys.stderr, helpers.full_stack_as_str(tb)
         self.dir = dir
         self.also = set()
         self.packs = []
@@ -434,10 +454,31 @@ class PackIdxList:
         self.bloom = None
         self.refresh()
 
-    def __del__(self):
+    def close(self):
         global _mpi_count
+        if self.closed:
+            print >> sys.stderr, 'redundant close _mpi_count', _mpi_count
+            assert _mpi_count in (0, 1, 2)
+            log('already closed ' + repr(self) + '\n')
+            return
+        print >> sys.stderr, 'close _mpi_count', _mpi_count
+        assert _mpi_count in (1, 2)
+        #assert _mpi_count == 1
+        self.closed = True
+        log('closing ' + repr(self) + '\n')
+        self.closed = True
+        if _mpi_count != 1:
+            print >> sys.stderr, 'bad _mpi_count', _mpi_count
+            dump_srcs(sys.stderr)
         _mpi_count -= 1
-        #assert(_mpi_count == 0)
+        print >> sys.stderr, 'decreased _mpi_count', _mpi_count
+        del _mpi_sources[repr(self)]
+        print >> sys.stderr, 'del completed', repr(self)
+        self.dir = None
+        print >> sys.stderr, 'closed', repr(self)
+
+    def __del__(self):
+        return self.close()
 
     def __iter__(self):
         return iter(idxmerge(self.packs))
