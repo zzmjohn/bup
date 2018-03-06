@@ -26,9 +26,8 @@ class PackMidx:
         try:
             self.map = mmap_read(open(filename), trace=True)
         except mmap.error as ex:
-            if ex.errno != errno.ENOMEM:
-                raise
-            dump_mmap_info(sys.stderr)
+            if ex.errno == errno.ENOMEM:
+                dump_mmap_info(sys.stderr)
             raise
         if str(self.map[0:4]) != 'MIDX':
             log('Warning: skipping: invalid MIDX header in %r\n' % filename)

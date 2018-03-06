@@ -744,19 +744,23 @@ def slashappend(s):
 mmaps = {}
 
 def notice_mmap(map, sz, tb):
-    mmaps[map] = sz, tb
+    mmaps[repr(map)] = sz, tb
 
-def print_full_stack(f, tb):
+def full_stack_as_str(tb):
+    result = []
     for x in reversed(inspect.getouterframes(tb.tb_frame)):
         frame, file, line, func, context_lines, context_i = x
-        f.write('File %r, line %d, in %s\n' % (file, line, func))
-        f.write('  %s\n' % context_lines[context_i].strip())
+        result.append('File %r, line %d, in %s\n' % (file, line, func))
+        if context_lines:
+            result.append('  %s\n' % context_lines[context_i].strip())
+        else:
+            result.append('  <none>\n')
+    return ''.join(result)
 
 def dump_mmap_info(f):
-    print >> f, mmaps.values()
-    for sz, tb in mmaps.values():
+    for sz, stack_str in mmaps.values():
         print >> f, '=== open mmap region of %d bytes ===' % sz
-        print_full_stack(f, tb)
+        print >> f, stack_str
     foot = '=== total of %d mmapped bytes ===' % sum(x[0] for x in mmaps.values())
     print >> f, '=' * len(foot)
     print >> f, foot
@@ -777,16 +781,15 @@ def _mmap_do(f, sz, flags, prot, close, trace=False):
             raise Exception()
         except Exception as ex:
             tb = sys.exc_info()[2]
-        notice_mmap(map, sz, tb)
+        notice_mmap(map, sz, full_stack_as_str(tb))
     if close:
         f.close()  # map will persist beyond file close
     return map
 
 def mmap_release(m):
     m.close()
-    return
-    assert mmaps[m]
-    del mmaps[m]
+    assert mmaps[repr(m)]
+    del mmaps[repr(m)]
 
 def mmap_read(f, sz = 0, close=True, trace=False):
     """Create a read-only memory mapped region on file 'f'.
@@ -851,7 +854,7 @@ if _mincore:
                     raise Exception()
                 except Exception as ex:
                     tb = sys.exc_info()[2]
-                notice_mmap(m, msize, tb)
+                notice_mmap(m, msize, full_stack_as_str(tb))
             except mmap.error as ex:
                 if ex.errno == errno.EINVAL or ex.errno == errno.ENODEV:
                     # Perhaps the file was a pipe, i.e. "... | bup split ..."
