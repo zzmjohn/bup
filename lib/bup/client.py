@@ -310,6 +310,7 @@ class PackWriter_Remote(git.PackWriter):
             self.file.write('\0\0\0\0')
             self._packopen = False
             self.onclose() # Unbusy
+            self.objcache.close()
             self.objcache = None
             return self.suggest_packs() # Returns last idx received
 

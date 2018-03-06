@@ -636,6 +636,7 @@ class PackWriter:
     """Writes Git objects inside a pack file."""
     def __init__(self, objcache_maker=_make_objcache, compression_level=1,
                  run_midx=True, on_pack_finish=None):
+        self.closed = False
         self.file = None
         self.parentfd = None
         self.count = 0
@@ -647,6 +648,7 @@ class PackWriter:
         self.compression_level = compression_level
         self.run_midx=run_midx
         self.on_pack_finish = on_pack_finish
+        print >> sys.stderr, 'opened packwriter', self
 
     def __del__(self):
         self.close()
@@ -775,12 +777,16 @@ class PackWriter:
 
     def abort(self):
         """Remove the pack file from disk."""
+        if self.objcache is not None:
+            self.objcache.close()
+            self.objcache = None
         f = self.file
         if f:
             pfd = self.parentfd
             self.file = None
             self.parentfd = None
             self.idx = None
+            self.objcache = None
             try:
                 try:
                     os.unlink(self.filename + '.pack')
@@ -795,7 +801,9 @@ class PackWriter:
         if not f: return None
         self.file = None
         try:
-            self.objcache = None
+            if self.objcache is not None:
+                self.objcache.close()
+                self.objcache = None
             idx = self.idx
             self.idx = None
 
@@ -991,16 +999,17 @@ def rev_parse(committish, repo_dir=None):
         debug2("resolved from ref: commit = %s\n" % head.encode('hex'))
         return head
 
-    pL = PackIdxList(repo('objects/pack', repo_dir=repo_dir))
-
     if len(committish) == 40:
         try:
             hash = committish.decode('hex')
         except TypeError:
             return None
 
+        pL = PackIdxList(repo('objects/pack', repo_dir=repo_dir))
         if pL.exists(hash):
+            pL.close()
             return hash
+        pL.close()
 
     return None
 

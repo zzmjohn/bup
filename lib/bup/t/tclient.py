@@ -40,6 +40,7 @@ def test_server_split_with_indexes():
             rw.breakpoint()
             rw.new_blob(s1)
             rw.close()
+            c.close()
     
 
 @wvtest

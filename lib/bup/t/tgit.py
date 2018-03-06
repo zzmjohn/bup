@@ -124,6 +124,7 @@ def testpacks():
             WVPASS(r.exists(hashes[5]))
             WVPASS(r.exists(hashes[6]))
             WVFAIL(r.exists('\0'*20))
+            r.close()
 
 
 @wvtest
